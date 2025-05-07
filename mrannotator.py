@@ -36,10 +36,13 @@ def iterate_through_csv(client, system_prompt, input_csv, output_csv, read_colum
         done = pd.read_csv(output_csv).set_index("id")[written_column]
         orig[written_column] = orig["id"].map(done).fillna("")
 
-    df = orig
-
-    if written_column not in df.columns:
+    df = pd.read_csv(input_csv)
+    if os.path.exists(output_csv):
+        annotated_df = pd.read_csv(output_csv)
+        df[written_column] = annotated_df[written_column].fillna("") 
+    else:
         df[written_column] = ""
+
 
     print("Total rows:", len(df), 
           "Already annotated:", (df[written_column]!="").sum(),
