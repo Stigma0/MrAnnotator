@@ -30,16 +30,12 @@ def generate_text(client, system_prompt, user_prompt, temperature= 0.7):
     return response.text
 
 def iterate_through_csv(client, system_prompt, input_csv, output_csv, read_column, written_column):
-    orig = pd.read_csv(input_csv)
+
+    df = pd.read_csv(input_csv, skipinitialspace=True)
 
     if os.path.exists(output_csv):
-        done = pd.read_csv(output_csv).set_index("id")[written_column]
-        orig[written_column] = orig["id"].map(done).fillna("")
-
-    df = pd.read_csv(input_csv)
-    if os.path.exists(output_csv):
-        annotated_df = pd.read_csv(output_csv)
-        df[written_column] = annotated_df[written_column].fillna("") 
+        annotated = pd.read_csv(output_csv, skipinitialspace=True)
+        df[written_column] = annotated[written_column].fillna("")
     else:
         df[written_column] = ""
 
