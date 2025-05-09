@@ -1,0 +1,103 @@
+import os
+import pdfplumber
+import textwrap
+from sentence_transformers import SentenceTransformer
+import faiss
+
+# =============================
+# CONFIGURATION
+# =============================
+# Toggle to build corpus from provided PDF filenames
+BUILD_CORPUS = True
+# List of PDF file paths to include when building the corpus
+pdf_list = ["input.pdf"]
+# Path to corpus file (one passage per line)
+corpus_file = "corpus.txt"
+# Maximum characters per chunk when building corpus
+MAX_CHARS = 1000
+# SentenceTransformer model for embeddings
+EMBED_MODEL_NAME = 'all-MiniLM-L6-v2'
+# Number of contexts to retrieve per query
+TOP_K = 5
+
+# =============================
+# 1) Corpus Builder
+# =============================
+def extract_text_from_pdf(pdf_path):
+    text = []
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text.append(page_text)
+    return "\n".join(text)
+
+
+def build_corpus(pdf_list, corpus_file, max_chars=1000):
+    """
+    Extract text from each PDF in pdf_list, split into paragraphs and chunks,
+    and write one chunk per line into corpus_file.
+    """
+    with open(corpus_file, 'w', encoding='utf-8') as out:
+        for path in pdf_list:
+            if not os.path.isfile(path):
+                print(f"Warning: '{path}' not found, skipping.")
+                continue
+            print(f"Processing {path}")
+            full = extract_text_from_pdf(path)
+            paras = [p.strip() for p in full.split("\n\n") if p.strip()]
+            for para in paras:
+                clean = para.replace("\n", " ")
+                chunks = textwrap.wrap(clean, width=max_chars, replace_whitespace=False)
+                for chunk in chunks:
+                    out.write(chunk.strip() + "\n")
+    print(f"Corpus built at: {corpus_file}")
+
+# =============================
+# 2) FAISS Retrieval
+# =============================
+def load_corpus(corpus_file):
+    with open(corpus_file, 'r', encoding='utf-8') as f:
+        return [line.strip() for line in f if line.strip()]
+
+
+def build_faiss_index(passages, model_name):
+    embed_model = SentenceTransformer(model_name)
+    embeddings = embed_model.encode(passages, convert_to_numpy=True)
+    d = embeddings.shape[1]
+    index = faiss.IndexFlatL2(d)
+    index.add(embeddings)
+    return embed_model, index
+
+
+def retrieve_contexts(embed_model, index, passages, query, k=5):
+    q_emb = embed_model.encode([query], convert_to_numpy=True)
+    D, I = index.search(q_emb, k)
+    return [(passages[i], float(D[0][j])) for j, i in enumerate(I[0])]
+
+# =============================
+# MAIN SCRIPT
+# =============================
+if __name__ == '__main__':
+    # Step 1: Optionally build the corpus
+    if BUILD_CORPUS:
+        build_corpus(pdf_list, corpus_file, max_chars=MAX_CHARS)
+
+    # Step 2: Load corpus and build FAISS index
+    if not os.path.exists(corpus_file):
+        raise FileNotFoundError(f"Corpus '{corpus_file}' not found.")
+    passages = load_corpus(corpus_file)
+    embed_model, index = build_faiss_index(passages, model_name=EMBED_MODEL_NAME)
+
+    # Step 3: Interactive retrieval
+    print("FAISS retrieval ready. Enter queries (type 'exit' to quit).\n")
+    while True:
+        query = input("Query> ")
+        if query.lower() in ('exit', 'quit'):
+            print("Exiting.")
+            break
+        results = retrieve_contexts(embed_model, index, passages, query, k=TOP_K)
+        print(f"\nTop {len(results)} contexts for: '{query}'")
+        for rank, (ctx, dist) in enumerate(results, start=1):
+            print(f"[{rank}] (dist={dist:.4f}): {ctx}\n")
+        print("-"*40 + "\n")
