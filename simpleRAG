@@ -1,0 +1,90 @@
+import os
+import pdfplumber
+import textwrap
+from sentence_transformers import SentenceTransformer
+import faiss
+import torch
+from transformers import DPRContextEncoder, DPRContextEncoderTokenizer, \
+                           DPRQuestionEncoder, DPRQuestionEncoderTokenizer
+
+# =============================
+# CONFIGURATION
+# =============================
+BUILD_CORPUS = True
+pdf_list = ["input.pdf"]
+corpus_file = "corpus.txt"
+MAX_CHARS = 100
+# DPR models for retrieval
+CTX_MODEL = 'facebook/dpr-ctx_encoder-single-nq-base'
+QST_MODEL = 'facebook/dpr-question_encoder-single-nq-base'
+TOP_K = 5
+
+# =============================
+# 1) Corpus Builder
+# =============================
+def extract_text_from_pdf(pdf_path):
+    text=[]
+    with pdfplumber.open(pdf_path) as pdf:
+        for p in pdf.pages:
+            t=p.extract_text()
+            if t: text.append(t)
+    return "\n".join(text)
+
+def build_corpus(pdf_list, corpus_file, max_chars=1000):
+    with open(corpus_file,'w',encoding='utf-8') as out:
+        for path in pdf_list:
+            if not os.path.isfile(path): continue
+            full=extract_text_from_pdf(path)
+            paras=[p.strip() for p in full.split("\n\n") if p.strip()]
+            for para in paras:
+                clean=para.replace("\n"," ")
+                for chunk in textwrap.wrap(clean,width=max_chars,replace_whitespace=False):
+                    out.write(chunk+"\n")
+    print(f"Corpus built: {corpus_file}")
+
+# =============================
+# 2) DPR + FAISS Retrieval Only
+# =============================
+def load_corpus(corpus_file):
+    return [l.strip() for l in open(corpus_file,encoding='utf-8') if l.strip()]
+
+def encode_contexts(passages):
+    tok=DPRContextEncoderTokenizer.from_pretrained(CTX_MODEL)
+    enc=DPRContextEncoder.from_pretrained(CTX_MODEL)
+    inputs=tok(passages,padding=True,truncation=True,return_tensors='pt')
+    return enc(**inputs).pooler_output.detach().numpy()
+
+def build_faiss_index(embs):
+    d=embs.shape[1]
+    idx=faiss.IndexFlatL2(d)
+    idx.add(embs)
+    return idx
+
+def retrieve_ctx(passages,index,query,k=TOP_K):
+    qt=DPRQuestionEncoderTokenizer.from_pretrained(QST_MODEL)
+    qe=DPRQuestionEncoder.from_pretrained(QST_MODEL)
+    q_in=qt([query],return_tensors='pt',truncation=True)
+    qemb=qe(**q_in).pooler_output.detach().numpy()
+    D,I=index.search(qemb,k)
+    return list(zip([passages[i] for i in I[0]], D[0]))
+
+# =============================
+# MAIN DEMO (Retrieval Only)
+# =============================
+if __name__=='__main__':
+    if BUILD_CORPUS:
+        build_corpus(pdf_list,corpus_file,MAX_CHARS)
+    if not os.path.exists(corpus_file):
+        raise FileNotFoundError(corpus_file)
+    passages=load_corpus(corpus_file)
+    ctx_embs=encode_contexts(passages)
+    index=build_faiss_index(ctx_embs)
+    print("Retrieval demo ready. Enter queries; 'exit' to quit.")
+    while True:
+        q=input("Query> ")
+        if q.lower() in ('exit','quit'): break
+        results=retrieve_ctx(passages,index,q,TOP_K)
+        print(f"Top {len(results)} contexts:")
+        for rank,(ctx,dist) in enumerate(results, start=1):
+            print(f"[{rank}] (dist={dist:.4f}): {ctx}")
+        print("\n"+"-"*30+"\n")
