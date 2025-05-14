@@ -4,6 +4,14 @@ import pandas as pd
 import re
 import time
 import wikipedia  
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    message="No parser was explicitly specified",
+    category=UserWarning,
+    module="wikipedia"
+)
 
 def fetch_wikipedia_context(query, sentences=5):
     """
@@ -47,13 +55,13 @@ def generate_text(client, system_prompt, user_prompt, temperature=0.7):
         return generate_text(client, system_prompt, user_prompt, temperature)
     return response.text
 
-def generate_wikipedia_queries(client, text, max_queries=5):
+def generate_wikipedia_queries(client, text, total_queries):
     """
     Uses an LLM to suggest up to `max_queries` relevant Wikipedia page titles
     for the given input text. Returns a list of strings.
     """
     prompt = (
-        f"Suggest {max_queries} Wikipedia page titles that are most relevant to the following text. "
+        f"Suggest {total_queries} Wikipedia page titles that are most relevant to the following text. "
         f"Return each title on its own line, with no numbering:\n{text}"
     )
 
@@ -66,39 +74,51 @@ def generate_wikipedia_queries(client, text, max_queries=5):
     lines = [line.strip() for line in response.text.splitlines() if line.strip()]
     return lines
 
-def build_wikipedia_context(client, text, max_queries=2, sentences_per_page=5):
+def build_wikipedia_context(client, text, queries_needed, total_queries_to_retrieve, sentences_per_context):
     """
     1. Generates up to `max_queries` relevant Wikipedia titles for `text`
-    2. Fetches the first `sentences_per_page` sentences from each page
+    2. Fetches the first `sentences_per_context` sentences from each page
     3. Concatenates all snippets into one larger context block
 
     Returns:
         concatenated_context (str)
     """
-    titles = generate_wikipedia_queries(client, text, max_queries)
+    titles = generate_wikipedia_queries(client, text, total_queries_to_retrieve)
+    print(f"Wikipedia queries generated: {titles}")
     snippets = []
     for title in titles:
-        ctx = fetch_wikipedia_context(title, sentences_per_page)
+        if len(snippets) >= queries_needed:
+            break
+        ctx = fetch_wikipedia_context(title, sentences_per_context)
         if ctx:
-            # you could also prefix each snippet with the title if you like:
-            # snippets.append(f"=== {title} ===\n{ctx}\n")
             snippets.append(ctx)
-
+        else:
+            print("query returned empty")
+        
+    if len(snippets) < queries_needed:
+        raise RuntimeError(
+            f"Could only fetch {len(snippets)} valid snippet(s), "
+            f"but needed {queries_needed} from up to {total_queries_to_retrieve} queries."
+        )
     # join them with double newlines for readability
     return "\n\n".join(snippets)
 
 def iterate_with_dynamic_prompt(
-    client, instruction, input_csv, output_csv,
-    read_column, write_column, write_column2, group
+    client, instruction, 
+    input_csv, output_csv,
+    read_column, write_column, write_column2, write_column3, 
+    group, queries_needed, total_queries_to_retrieve, sentences_per_context
 ):
     df = pd.read_csv(input_csv)
     if os.path.exists(output_csv):
         annotated = pd.read_csv(output_csv)
         df[write_column] = annotated[write_column].fillna("")
         df[write_column2] = annotated[write_column2].fillna("")
+        df[write_column3] = annotated[write_column3].fillna("")
     else:
         df[write_column] = ""
         df[write_column2] = ""
+        df[write_column3] = ""
 
     print("Total rows:", len(df),
           "Already annotated:", (df[write_column]!="").sum(),
@@ -110,7 +130,9 @@ def iterate_with_dynamic_prompt(
         subject = row[read_column]
 
         print("Generating wikipedia queries for:", subject)
-        context = build_wikipedia_context(client, subject)
+        context = build_wikipedia_context(client, subject, queries_needed, total_queries_to_retrieve, sentences_per_context)
+        flat_context = context.replace('\n', ' ').replace('\'', '').strip()
+        df.at[idx, write_column3] = f"'{flat_context}'"
         print("Generated Context:",context)
         persona = persona_creating_agent(client, group, context)
         print(f"A persona belonging to {group} community was created:\n\n{persona}")
@@ -122,7 +144,6 @@ def iterate_with_dynamic_prompt(
         generated = generate_text(client, full_prompt, subject)
         cleaned = re.sub(r"\W", "", generated)
         print(f"Annotated: {cleaned}")
-
         df.at[idx, write_column] = f"'{cleaned}'"
         df.to_csv(output_csv, index=False)
 
@@ -134,7 +155,11 @@ output_csv = "sample5_annotated.csv"
 read_column = "Input.text"
 write_column = "Annotator1"
 write_column2  = f"{write_column}_Persona"
+write_column3 = f"{write_column}_Context"
 group = "Black" # The annotator beongs to this community
+queries_needed=2
+total_queries_to_retrieve=5
+sentences_per_context=5
 
 try:
     GEMINI_API_KEY=os.environ.get("GEMINI_API_KEY")
@@ -146,5 +171,6 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 iterate_with_dynamic_prompt(
     client, instruction,
     input_csv, output_csv,
-    read_column, write_column, write_column2, group
+    read_column, write_column, write_column2, write_column3, 
+    group, queries_needed, total_queries_to_retrieve, sentences_per_context
 )
