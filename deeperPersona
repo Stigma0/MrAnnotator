@@ -64,12 +64,16 @@ def generate_wikipedia_queries(client, text, total_queries):
         f"Suggest {total_queries} Wikipedia page titles that are most relevant to the following text. "
         f"Return each title on its own line, with no numbering:\n{text}"
     )
-
-    response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        config={"temperature": 0.7},
-        contents=prompt
-    )
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            config={"temperature": 0.7},
+            contents=prompt
+        )
+    except Exception as e:
+        print(f"Error generating for query {text!r}: {e!r}")
+        time.sleep(60)
+        return generate_wikipedia_queries(client, text, total_queries)
     # split on newlines and strip
     lines = [line.strip() for line in response.text.splitlines() if line.strip()]
     return lines
@@ -150,15 +154,15 @@ def iterate_with_dynamic_prompt(
 instruction = (
     "Based on your defined persona, your task is to output 'Hate' or 'Not Hate' depending on the text you read."
 )
-input_csv = "sample5.csv"
-output_csv = "sample5_annotated.csv"
+input_csv = "sample_mexican.csv"
+output_csv = "sample_mexican_annotated.csv"
 read_column = "Input.text"
-write_column = "Annotator1"
+write_column = "Mexican"
 write_column2  = f"{write_column}_Persona"
 write_column3 = f"{write_column}_Context"
-group = "Black" # The annotator beongs to this community
+group = "Mexican" # The annotator beongs to this community
 queries_needed=2
-total_queries_to_retrieve=5
+total_queries_to_retrieve=8
 sentences_per_context=5
 
 try:
