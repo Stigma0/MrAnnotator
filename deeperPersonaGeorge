@@ -1,0 +1,182 @@
+import os
+from google import genai
+import pandas as pd
+import re
+import time
+import wikipedia  
+import warnings
+from openai import OpenAI
+warnings.filterwarnings(
+    "ignore",
+    message="No parser was explicitly specified",
+    category=UserWarning,
+    module="wikipedia"
+)
+
+def fetch_wikipedia_context(query, sentences=5):
+    """
+    Fetches a brief context summary from Wikipedia for the given query.
+    """
+    try:
+        page = wikipedia.page(query)
+        # grab the first `sentences` from the summary
+        summary = page.summary.split('. ')[:sentences]
+        return '. '.join(summary) + '.'
+    except Exception:
+        return ""  # fallback to empty if not found
+
+def persona_creating_agent(client, group, context):
+    """
+    Refines the base_prompt into a persona-aware system instruction,
+    injecting the retrieved context.
+    """
+    system_prompt = (
+        f"You will create a person of a member of {group} community and an expert who specializes in the provided context. Don't reply with anything other than the person"
+    )
+    persona = generate_text(client, system_prompt, context)
+    cleaned = persona.replace("*","")
+    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    cleaned_persona = '\n'.join(lines)
+    return cleaned_persona
+
+def generate_text(client, system_prompt, user_prompt, temperature=0.7):
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages = [
+                {"role": "developer", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature = temperature
+        )
+    except Exception as e:
+        print(f"Error generating for prompt {user_prompt!r}: {e!r}")
+        time.sleep(60)
+        return generate_text(client, system_prompt, user_prompt, temperature)
+    return response.choices[0].message.content
+
+def generate_wikipedia_queries(client, text, total_queries):
+    """
+    Uses an LLM to suggest up to `max_queries` relevant Wikipedia page titles
+    for the given input text. Returns a list of strings.
+    """
+    prompt = (
+        f"Suggest {total_queries} Wikipedia page titles that are most relevant to the following text. "
+        f"Return each title on its own line, with no numbering:\n{text}"
+    )
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages = [
+                {"role": "user", "content": prompt}
+            ],
+            temperature = 0.7
+        )
+    except Exception as e:
+        print(f"Error generating for query {text!r}: {e!r}")
+        time.sleep(60)
+        return generate_wikipedia_queries(client, text, total_queries)
+    # split on newlines and strip
+    lines = [line.strip() for line in response.choices[0].message.content.splitlines() if line.strip()]
+    return lines
+
+def build_wikipedia_context(client, text, queries_needed, total_queries_to_retrieve, sentences_per_context):
+    """
+    1. Generates up to `max_queries` relevant Wikipedia titles for `text`
+    2. Fetches the first `sentences_per_context` sentences from each page
+    3. Concatenates all snippets into one larger context block
+
+    Returns:
+        concatenated_context (str)
+    """
+    titles = generate_wikipedia_queries(client, text, total_queries_to_retrieve)
+    print(f"Wikipedia queries generated: {titles}")
+    snippets = []
+    for title in titles:
+        if len(snippets) >= queries_needed:
+            break
+        ctx = fetch_wikipedia_context(title, sentences_per_context)
+        if ctx:
+            snippets.append(ctx)
+        else:
+            print("query returned empty")
+        
+    if len(snippets) < queries_needed:
+        raise RuntimeError(
+            f"Could only fetch {len(snippets)} valid snippet(s), "
+            f"but needed {queries_needed} from up to {total_queries_to_retrieve} queries."
+        )
+    # join them with double newlines for readability
+    return "\n\n".join(snippets)
+
+def iterate_with_dynamic_prompt(
+    client, instruction, 
+    input_csv, output_csv,
+    read_column, write_column, write_column2, write_column3, 
+    group, queries_needed, total_queries_to_retrieve, sentences_per_context
+):
+    df = pd.read_csv(input_csv)
+    if os.path.exists(output_csv):
+        annotated = pd.read_csv(output_csv)
+        df[write_column] = annotated[write_column].fillna("")
+        df[write_column2] = annotated[write_column2].fillna("")
+        df[write_column3] = annotated[write_column3].fillna("")
+    else:
+        df[write_column] = ""
+        df[write_column2] = ""
+        df[write_column3] = ""
+
+    print("Total rows:", len(df),
+          "Already annotated:", (df[write_column]!="").sum(),
+          "To do:", (df[write_column]=="").sum())
+
+    for idx, row in df.iterrows():
+        if row[write_column]:
+            continue
+        subject = row[read_column]
+
+        print("Generating wikipedia queries for:", subject)
+        context = build_wikipedia_context(client, subject, queries_needed, total_queries_to_retrieve, sentences_per_context)
+        flat_context = context.replace('\n', ' ').replace('\'', '').strip()
+        df.at[idx, write_column3] = f"'{flat_context}'"
+        print("Generated Context:",context)
+        persona = persona_creating_agent(client, group, context)
+        print(f"A persona belonging to {group} community was created:\n\n{persona}")
+        flat_persona = persona.replace('\n', ' ').replace('\'', '').strip()
+        df.at[idx, write_column2] = f"'{flat_persona}'"
+        print(f"The persona was saved to {write_column2}")
+        full_prompt = flat_persona + instruction
+        print("Annotating for input:", subject)
+        generated = generate_text(client, full_prompt, subject)
+        cleaned = re.sub(r"\W", "", generated)
+        print(f"Annotated: {cleaned}")
+        df.at[idx, write_column] = f"'{cleaned}'"
+        df.to_csv(output_csv, index=False)
+
+instruction = (
+    "Based on your defined persona, your task is to output 'Hate' or 'Not Hate' depending on the text you read."
+)
+input_csv = "sample_mexican.csv"
+output_csv = "sample_mexican_gpt_annotated.csv"
+read_column = "Input.text"
+write_column = "Mexican"
+write_column2  = f"{write_column}_Persona"
+write_column3 = f"{write_column}_Context"
+group = "Mexican" # The annotator beongs to this community
+queries_needed=2
+total_queries_to_retrieve=8
+sentences_per_context=5
+
+try:
+    OPENAI_API_KEY=os.environ.get("OPENAI_API_KEY")
+except Exception as e:
+    print("ERROR: OPENAI_API_KEY couldn't be accessed")
+
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+iterate_with_dynamic_prompt(
+    client, instruction,
+    input_csv, output_csv,
+    read_column, write_column, write_column2, write_column3, 
+    group, queries_needed, total_queries_to_retrieve, sentences_per_context
+)
